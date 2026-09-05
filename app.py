@@ -13,7 +13,7 @@ con = get_connection()
 
 st.title("🚕 MetroPulse: NYC Urban Mobility Analytics")
 st.caption("Apr-Jun 2024 | NYC Taxi, Weather, and Subway Data")
-st.caption(f"Dashboard last rebuilt from pipeline: {datetime.now().strftime('%Y-%m-%d')} (rebuild via build_dashboard_db.py)")
+st.caption(f"Dashboard viewed: {datetime.now().strftime('%Y-%m-%d')} | Data rebuilt from pipeline via build_dashboard_db.py")
 
 st.sidebar.header("Filters")
 date_range = con.execute("SELECT MIN(the_date), MAX(the_date) FROM mart_daily_summary_clean").fetchone()
@@ -29,6 +29,13 @@ boroughs = con.execute("""
 borough_list = [b[0] for b in boroughs]
 selected_boroughs = st.sidebar.multiselect("Pickup Borough", borough_list, default=borough_list)
 
+dropoff_boroughs = con.execute("""
+    SELECT DISTINCT dropoff_borough FROM agg_dropoff_stats
+    WHERE dropoff_borough IS NOT NULL ORDER BY dropoff_borough
+""").fetchall()
+dropoff_list = [d[0] for d in dropoff_boroughs]
+selected_dropoffs = st.sidebar.multiselect("Dropoff Borough", dropoff_list, default=dropoff_list)
+
 payment_types = con.execute("SELECT DISTINCT payment_type FROM agg_daily_borough_totals ORDER BY payment_type").fetchall()
 payment_list = [p[0] for p in payment_types]
 selected_payments = st.sidebar.multiselect("Payment Type", payment_list, default=payment_list)
@@ -37,12 +44,35 @@ rate_types = con.execute("SELECT DISTINCT rate_code_id FROM agg_daily_borough_to
 rate_list = [r[0] for r in rate_types]
 selected_rates = st.sidebar.multiselect("Rate Code", rate_list, default=rate_list)
 
+daypart_options = ["Night (0-5)", "Morning (6-11)", "Afternoon (12-16)", "Evening (17-21)", "Late Night (22-23)"]
+selected_dayparts = st.sidebar.multiselect("Daypart", daypart_options, default=daypart_options)
+
+weather_options = ["Dry", "Rain/Snow"]
+selected_weather = st.sidebar.multiselect("Weather Condition", weather_options, default=weather_options)
+
 st.sidebar.caption("Note: Payment type 2 = cash. Cash tips are not captured in this "
                     "data source, so cash-trip tip% will show as 0% - a known data limitation, not a real behavior pattern.")
 
+def daypart_hours(selected):
+    ranges = {
+        "Night (0-5)": range(0, 6), "Morning (6-11)": range(6, 12),
+        "Afternoon (12-16)": range(12, 17), "Evening (17-21)": range(17, 22),
+        "Late Night (22-23)": range(22, 24)
+    }
+    hours = []
+    for d in selected:
+        hours.extend(list(ranges.get(d, [])))
+    return hours if hours else [-1]
+
 borough_filter = "'" + "','".join(str(b) for b in selected_boroughs) + "'" if selected_boroughs else "''"
+dropoff_filter = "'" + "','".join(str(d) for d in selected_dropoffs) + "'" if selected_dropoffs else "''"
 payment_filter = ",".join(str(p) for p in selected_payments) if selected_payments else "-999"
 rate_filter = ",".join(str(r) for r in selected_rates) if selected_rates else "-999"
+hour_filter = ",".join(str(h) for h in daypart_hours(selected_dayparts))
+weather_dates_filter = None
+if len(selected_weather) == 1:
+    is_precip = selected_weather[0] == "Rain/Snow"
+    weather_dates_filter = is_precip
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Executive Overview", "Temporal Demand", "Geographic Performance",
@@ -84,7 +114,7 @@ with tab2:
     hourly = con.execute(f"""
         SELECT pickup_hour, SUM(trips) AS trips FROM agg_hourly_demand
         WHERE pickup_borough IN ({borough_filter}) AND payment_type IN ({payment_filter})
-        AND rate_code_id IN ({rate_filter})
+        AND rate_code_id IN ({rate_filter}) AND pickup_hour IN ({hour_filter})
         GROUP BY pickup_hour ORDER BY pickup_hour
     """).df()
     if hourly.empty or hourly["trips"].sum() == 0:
@@ -96,7 +126,7 @@ with tab2:
     dow = con.execute(f"""
         SELECT pickup_day_of_week, SUM(trips) AS trips FROM agg_hourly_demand
         WHERE pickup_borough IN ({borough_filter}) AND payment_type IN ({payment_filter})
-        AND rate_code_id IN ({rate_filter})
+        AND rate_code_id IN ({rate_filter}) AND pickup_hour IN ({hour_filter})
         GROUP BY pickup_day_of_week ORDER BY pickup_day_of_week
     """).df()
     if not dow.empty:
@@ -131,8 +161,24 @@ with tab3:
         GROUP BY pickup_borough ORDER BY trips DESC
     """).df()
     if not borough_dist.empty:
-        st.subheader("Trips by Borough")
+        st.subheader("Trips by Pickup Borough")
         st.bar_chart(borough_dist.set_index("pickup_borough"))
+
+    st.subheader("Pickup Borough -> Dropoff Borough Flow")
+    flow = con.execute(f"""
+        SELECT pickup_borough, dropoff_borough, SUM(trips) AS trips,
+               ROUND(SUM(avg_fare * trips) / NULLIF(SUM(trips),0), 2) AS avg_fare
+        FROM agg_dropoff_stats
+        WHERE pickup_date BETWEEN '{start_date}' AND '{end_date}'
+        AND pickup_borough IN ({borough_filter}) AND dropoff_borough IN ({dropoff_filter})
+        AND pickup_hour IN ({hour_filter})
+        GROUP BY pickup_borough, dropoff_borough
+        ORDER BY trips DESC LIMIT 15
+    """).df()
+    if flow.empty:
+        st.warning("No data matches the current filter selection.")
+    else:
+        st.dataframe(flow, width='stretch')
 
 with tab4:
     st.header("Fares & Payments")
@@ -156,10 +202,16 @@ with tab4:
 
 with tab5:
     st.header("Weather & Transit Analysis")
+
+    weather_query_filter = ""
+    if weather_dates_filter is not None:
+        weather_query_filter = f"AND is_precipitation_day = {weather_dates_filter}"
+
     weather_compare = con.execute(f"""
         SELECT is_precipitation_day, ROUND(AVG(total_trips), 0) AS avg_trips
         FROM mart_daily_summary_clean
         WHERE the_date BETWEEN '{start_date}' AND '{end_date}'
+        {weather_query_filter}
         GROUP BY is_precipitation_day
     """).df()
     if not weather_compare.empty:
@@ -169,11 +221,14 @@ with tab5:
         st.caption("Statistical note: this difference is NOT statistically significant "
                    "(95% CI for the difference includes 0). Correlation/association does not imply "
                    "causation - weather shows minimal measurable relationship with taxi demand here.")
+    else:
+        st.warning("No data matches the current weather filter selection.")
 
     subway_taxi = con.execute(f"""
         SELECT the_date, total_trips, total_subway_ridership
         FROM mart_daily_summary_clean
         WHERE the_date BETWEEN '{start_date}' AND '{end_date}'
+        {weather_query_filter}
         ORDER BY the_date
     """).df()
     if not subway_taxi.empty:

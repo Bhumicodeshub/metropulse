@@ -30,4 +30,4 @@ I directed the project scope and priorities, ran every script personally,
 reviewed and caught issues in the outputs (including a date-leakage bug in
 an early aggregation, which I identified from an unexpected row count and
 which we then corrected together), and made the final calls on data
-handling, initiative selection, and interpretation throughout.
+handling, initiative selection, and interpretation throughout. 

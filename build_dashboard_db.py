@@ -44,6 +44,16 @@ con.execute("""
     GROUP BY pickup_date, pickup_borough, payment_type, rate_code_id
 """)
 
+con.execute("""
+    CREATE OR REPLACE TABLE dash.agg_dropoff_stats AS
+    SELECT pickup_borough, dropoff_borough, pickup_date, pickup_hour,
+           COUNT(*) AS trips,
+           ROUND(AVG(total_amount), 2) AS avg_fare
+    FROM mart_trips_clean
+    WHERE dropoff_borough IS NOT NULL
+    GROUP BY pickup_borough, dropoff_borough, pickup_date, pickup_hour
+""")
+
 con.execute("CREATE OR REPLACE TABLE dash.raw_ingestion_log AS SELECT * FROM raw_ingestion_log")
 
 con.execute("""

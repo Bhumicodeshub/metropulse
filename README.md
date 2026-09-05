@@ -114,3 +114,14 @@ and the Data Quality Status tab on the dashboard for full breakdown.
 Two other candidates (weather-triggered planning, transit-disruption response)
 were investigated and explicitly rejected with supporting evidence - see
 pilot_designs.md.
+## Query Optimization
+
+The dashboard does not query the full 9.2M-row mart_trips_clean table directly.
+Instead, build_dashboard_db.py pre-aggregates it into small summary tables
+(agg_hourly_demand, agg_zone_stats, agg_payment_stats, agg_dropoff_stats,
+agg_daily_borough_totals) grouped by the dimensions the dashboard actually
+filters on. This reduces every dashboard query from a full scan of millions of
+rows to a scan of a few thousand pre-aggregated rows, and keeps the deployed
+database at ~6.5MB instead of several GB. This is the same optimization
+strategy as a database materialized view or OLAP cube: pay the aggregation
+cost once at build time, not on every user interaction.
